@@ -1,7 +1,7 @@
 {
-  "name": "taixiu-websocket-api",
+  "name": "game-prediction-ultimate",
   "version": "1.0.0",
-  "description": "WebSocket client + REST API với dự đoán thông minh cho tài xỉu",
+  "description": "Ultimate prediction server for Tai Xiu games",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
