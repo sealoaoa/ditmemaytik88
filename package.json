@@ -1,7 +1,7 @@
 {
   "name": "taixiu-websocket-api",
   "version": "1.0.0",
-  "description": "WebSocket client + REST API cho dữ liệu tài xỉu",
+  "description": "WebSocket client + REST API với dự đoán thông minh cho tài xỉu",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
