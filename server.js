@@ -388,11 +388,9 @@ class GameWebSocketClient {
             else break;
         }
         // Tính xác suất tiếp tục streak dựa trên lịch sử
-        // Tìm tất cả các streak có độ dài >= streak hiện tại và xem tỷ lệ phiên tiếp theo giống streak
         let continueCount = 0;
         let totalStreakEvents = 0;
         for (let i = 0; i < results.length - streak; i++) {
-            // Kiểm tra xem từ i có streak dài ít nhất streak không
             let j = 0;
             while (j < streak && i + j < results.length && results[i + j] === first) j++;
             if (j >= streak) {
@@ -400,7 +398,8 @@ class GameWebSocketClient {
                 if (i + streak < results.length && results[i + streak] === first) continueCount++;
             }
         }
-        const probContinue = totalStreakEvents > 0 ? continueCount / totalStreakEvents : 0.5;
+        let probContinue = totalStreakEvents > 0 ? continueCount / totalStreakEvents : 0.5;
+        if (isNaN(probContinue)) probContinue = 0.5;
         return { streak, outcome: first, probContinue };
     }
 
@@ -417,16 +416,20 @@ class GameWebSocketClient {
         }
         const total = countSame + countDiff;
         if (total === 0) return { tai: 0.5, xiu: 0.5 };
-        return {
+        let result = {
             [last]: countSame / total,
             [last === 'tài' ? 'xỉu' : 'tài']: countDiff / total
         };
+        // Đảm bảo cả hai key tồn tại
+        if (typeof result.tai !== 'number') result.tai = result.tai === undefined ? 0.5 : result.tai;
+        if (typeof result.xiu !== 'number') result.xiu = result.xiu === undefined ? 0.5 : result.xiu;
+        return result;
     }
 
     // Markov bậc 2: dựa trên 2 kết quả gần nhất
     _markov2(results) {
         if (results.length < 3) return null;
-        const lastTwo = results.slice(0, 2).join('-'); // "tài-tài", "tài-xỉu", ...
+        const lastTwo = results.slice(0, 2).join('-');
         const transitions = {};
         for (let i = 0; i < results.length - 2; i++) {
             const key = results[i] + '-' + results[i + 1];
@@ -447,20 +450,15 @@ class GameWebSocketClient {
     // Phân tích mẫu cầu trong 10 phiên gần nhất
     _patternAnalysis(results) {
         if (results.length < 10) return { prediction: null, confidence: 0 };
-        const recent = results.slice(0, 10); // 10 phiên gần nhất
-        // Tìm chu kỳ lặp lại (1-1, 2-2, 3-3,...)
-        // Đơn giản: xem 2 phiên cuối, nếu là 1-1 thì dự đoán đối
+        const recent = results.slice(0, 10);
         if (recent[0] === recent[1]) {
-            // 2 phiên liên tiếp giống nhau: dự đoán đảo? Thực tế có thể bệt tiếp hoặc đảo, nhưng theo cầu bệt thường dễ bệt tiếp
-            // Ta sẽ dựa vào thống kê bệt dài
-            return { prediction: recent[0], confidence: 0.6 }; // thiên về bệt tiếp
+            return { prediction: recent[0], confidence: 0.6 };
         } else {
-            // 2 phiên xen kẽ (tài-xỉu hoặc xỉu-tài): dự đoán tiếp tục đảo? (cầu 1-1)
             return { prediction: recent[0] === 'tài' ? 'xỉu' : 'tài', confidence: 0.65 };
         }
     }
 
-    // Dự đoán tổng hợp
+    // Dự đoán tổng hợp (đã sửa lỗi NaN)
     predictNext(historyArray) {
         const results = this._getRecentResults(historyArray, 50);
         if (results.length < 5) {
@@ -470,40 +468,44 @@ class GameWebSocketClient {
             };
         }
 
-        // 1. Tần suất tổng thể (trọng số 1)
+        // 1. Tần suất tổng thể
         const overall = this._overallProbability(results);
         
         // 2. Phân tích streak
         const streak = this._streakAnalysis(results);
-        let streakPred = streak.outcome;
-        let streakProb = streak.probContinue; // xác suất streak tiếp tục
+        let streakProb = streak.probContinue;
+        if (isNaN(streakProb)) streakProb = 0.5;
 
         // 3. Markov bậc 1
         const markov1 = this._markov1(results);
-        // markov1 trả về xác suất cho kết quả tiếp theo dựa trên kết quả cuối
+        let markov1Tai = typeof markov1.tai === 'number' ? markov1.tai : 0.5;
+        let markov1Xiu = typeof markov1.xiu === 'number' ? markov1.xiu : 0.5;
 
-        // 4. Markov bậc 2 (nếu có)
+        // 4. Markov bậc 2
         const markov2 = this._markov2(results);
+        let markov2Tai = markov2 && typeof markov2.tai === 'number' ? markov2.tai : null;
+        let markov2Xiu = markov2 && typeof markov2.xiu === 'number' ? markov2.xiu : null;
 
         // 5. Phân tích mẫu cầu
         const pattern = this._patternAnalysis(results);
+        let patternPred = pattern.prediction;
+        let patternConf = typeof pattern.confidence === 'number' ? pattern.confidence : 0;
 
-        // Tổng hợp các dự đoán
-        let taiScore = 0, xiuScore = 0;
-        let totalWeight = 0;
-
-        // Trọng số: có thể điều chỉnh dựa trên độ tin cậy từng phương pháp
+        // Trọng số
         const weightOverall = 1.0;
-        const weightStreak = streak.streak >= 3 ? 2.0 : 1.0; // tăng trọng số nếu streak dài
+        const weightStreak = streak.streak >= 3 ? 2.0 : 1.0;
         const weightMarkov1 = 1.5;
         const weightMarkov2 = markov2 ? 2.0 : 0;
-        const weightPattern = pattern.confidence > 0.6 ? 1.2 : 0.5;
+        const weightPattern = patternConf > 0.6 ? 1.2 : (patternPred ? 0.5 : 0);
 
+        let taiScore = 0, xiuScore = 0, totalWeight = 0;
+
+        // Overall
         taiScore += overall.tai * weightOverall;
         xiuScore += overall.xiu * weightOverall;
         totalWeight += weightOverall;
 
-        // Streak: đóng góp dựa trên probContinue
+        // Streak
         if (streak.outcome === 'tài') {
             taiScore += streakProb * weightStreak;
             xiuScore += (1 - streakProb) * weightStreak;
@@ -514,57 +516,69 @@ class GameWebSocketClient {
         totalWeight += weightStreak;
 
         // Markov1
-        taiScore += markov1.tai * weightMarkov1;
-        xiuScore += markov1.xiu * weightMarkov1;
+        taiScore += markov1Tai * weightMarkov1;
+        xiuScore += markov1Xiu * weightMarkov1;
         totalWeight += weightMarkov1;
 
         // Markov2
         if (markov2) {
-            taiScore += markov2.tai * weightMarkov2;
-            xiuScore += markov2.xiu * weightMarkov2;
+            taiScore += markov2Tai * weightMarkov2;
+            xiuScore += markov2Xiu * weightMarkov2;
             totalWeight += weightMarkov2;
         }
 
         // Pattern
-        if (pattern.prediction) {
-            if (pattern.prediction === 'tài') {
-                taiScore += pattern.confidence * weightPattern;
-                xiuScore += (1 - pattern.confidence) * weightPattern;
+        if (patternPred) {
+            if (patternPred === 'tài') {
+                taiScore += patternConf * weightPattern;
+                xiuScore += (1 - patternConf) * weightPattern;
             } else {
-                xiuScore += pattern.confidence * weightPattern;
-                taiScore += (1 - pattern.confidence) * weightPattern;
+                xiuScore += patternConf * weightPattern;
+                taiScore += (1 - patternConf) * weightPattern;
             }
             totalWeight += weightPattern;
         }
 
-        // Chuẩn hóa
+        // Kiểm tra NaN
+        if (isNaN(taiScore) || isNaN(xiuScore) || isNaN(totalWeight) || totalWeight === 0) {
+            return {
+                success: false,
+                message: 'Lỗi tính toán dự đoán (NaN)',
+                prediction: 'không xác định',
+                confidence: '0%',
+                analysis: null,
+                timestamp: new Date().toISOString()
+            };
+        }
+
         const finalTai = taiScore / totalWeight;
         const finalXiu = xiuScore / totalWeight;
-        const prediction = finalTai > finalXiu ? 'tài' : (finalXiu > finalTai ? 'xỉu' : 'không xác định');
-        const confidence = prediction === 'tài' ? finalTai * 100 : finalXiu * 100;
+        let prediction = finalTai > finalXiu ? 'tài' : (finalXiu > finalTai ? 'xỉu' : 'không xác định');
+        let confidence = prediction === 'tài' ? finalTai * 100 : (prediction === 'xỉu' ? finalXiu * 100 : 0);
+        if (isNaN(confidence)) confidence = 0;
 
-        // Lấy thêm thông tin phân tích chi tiết
         return {
             success: true,
             prediction,
             confidence: Math.round(confidence * 10) / 10 + '%',
             analysis: {
                 totalSessions: results.length,
-                recentResults: results.slice(0, 15), // 15 phiên gần nhất
+                recentResults: results.slice(0, 15),
                 overall: overall,
                 streak: {
                     length: streak.streak,
                     outcome: streak.outcome,
                     probContinue: Math.round(streak.probContinue * 100) / 100
                 },
-                markov1: markov1,
-                markov2: markov2 || null,
-                pattern: pattern.prediction ? { prediction: pattern.prediction, confidence: pattern.confidence } : null,
+                markov1: { tai: markov1Tai, xiu: markov1Xiu },
+                markov2: markov2 ? { tai: markov2Tai, xiu: markov2Xiu } : null,
+                pattern: patternPred ? { prediction: patternPred, confidence: patternConf } : null,
                 weightedScores: {
                     tai: Math.round(finalTai * 1000) / 1000,
                     xiu: Math.round(finalXiu * 1000) / 1000
                 }
-            }
+            },
+            timestamp: new Date().toISOString()
         };
     }
 
@@ -625,88 +639,57 @@ class GameWebSocketClient {
 
 // KHỞI TẠO EXPRESS SERVER
 const app = express();
-const PORT = process.env.PORT || 3012;  // Dùng port từ Render nếu có
+const PORT = process.env.PORT || 3012;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Tạo WebSocket client - URL MỚI
+// Tạo WebSocket client
 const client = new GameWebSocketClient(
     'wss://api.apibinh.xyz/websocket?d=YW1SdWFXSnVhQT09fDJ8MTc2NjUzNjU0MTM3MHw0YTAxZjZhY2JjMGRhYjhkNWE1YzM3YzVjMmVlM2JjYXwyZmQ4Y2ZmZmM1NDQ5MGY3N2QyODg5ZWIyM2IzZGFlYg=='
 );
 
-// Kết nối WebSocket
 client.connect();
 
-// Route để lấy phiên gần nhất từ bàn TX
+// API endpoints
 app.get('/api/tx', (req, res) => {
     try {
         const latestSession = client.getLatestTxSession();
-        
-        if (latestSession.error) {
-            return res.status(404).json(latestSession);
-        }
-        
+        if (latestSession.error) return res.status(404).json(latestSession);
         res.json(latestSession);
     } catch (error) {
-        res.status(500).json({
-            error: "Lỗi server",
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
+        res.status(500).json({ error: "Lỗi server", message: error.message, timestamp: new Date().toISOString() });
     }
 });
 
-// Route để lấy phiên gần nhất từ bàn MD5
 app.get('/api/md5', (req, res) => {
     try {
         const latestSession = client.getLatestMd5Session();
-        
-        if (latestSession.error) {
-            return res.status(404).json(latestSession);
-        }
-        
+        if (latestSession.error) return res.status(404).json(latestSession);
         res.json(latestSession);
     } catch (error) {
-        res.status(500).json({
-            error: "Lỗi server",
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
+        res.status(500).json({ error: "Lỗi server", message: error.message, timestamp: new Date().toISOString() });
     }
 });
 
-// Route để lấy cả 2 bàn
 app.get('/api/all', (req, res) => {
     try {
         const txSession = client.getLatestTxSession();
         const md5Session = client.getLatestMd5Session();
-        
         res.json({
             tai_xiu: txSession.error ? { error: txSession.error } : txSession,
             md5: md5Session.error ? { error: md5Session.error } : md5Session,
             timestamp: new Date().toISOString()
         });
     } catch (error) {
-        res.status(500).json({
-            error: "Lỗi server",
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
+        res.status(500).json({ error: "Lỗi server", message: error.message, timestamp: new Date().toISOString() });
     }
 });
 
-// Route kiểm tra trạng thái
 app.get('/api/status', (req, res) => {
-    const hasTxData = client.latestTxData && 
-                     client.latestTxData.htr && 
-                     client.latestTxData.htr.length > 0;
-    
-    const hasMd5Data = client.latestMd5Data && 
-                      client.latestMd5Data.htr && 
-                      client.latestMd5Data.htr.length > 0;
-    
+    const hasTxData = client.latestTxData && client.latestTxData.htr && client.latestTxData.htr.length > 0;
+    const hasMd5Data = client.latestMd5Data && client.latestMd5Data.htr && client.latestMd5Data.htr.length > 0;
     res.json({
         status: "running",
         websocket_connected: client.ws ? client.ws.readyState === WebSocket.OPEN : false,
@@ -715,92 +698,53 @@ app.get('/api/status', (req, res) => {
         has_md5_data: hasMd5Data,
         tx_data_count: hasTxData ? client.latestTxData.htr.length : 0,
         md5_data_count: hasMd5Data ? client.latestMd5Data.htr.length : 0,
-        tx_latest_sid: hasTxData ? 
-            client.latestTxData.htr.reduce((p, c) => c.sid > p.sid ? c : p).sid : 
-            null,
-        md5_latest_sid: hasMd5Data ? 
-            client.latestMd5Data.htr.reduce((p, c) => c.sid > p.sid ? c : p).sid : 
-            null,
+        tx_latest_sid: hasTxData ? client.latestTxData.htr.reduce((p, c) => c.sid > p.sid ? c : p).sid : null,
+        md5_latest_sid: hasMd5Data ? client.latestMd5Data.htr.reduce((p, c) => c.sid > p.sid ? c : p).sid : null,
         tx_last_updated: client.lastUpdateTime.tx ? client.lastUpdateTime.tx.toISOString() : null,
         md5_last_updated: client.lastUpdateTime.md5 ? client.lastUpdateTime.md5.toISOString() : null,
         timestamp: new Date().toISOString()
     });
 });
 
-// Route refresh dữ liệu
 app.get('/api/refresh', (req, res) => {
     if (client.isAuthenticated && client.ws && client.ws.readyState === WebSocket.OPEN) {
         client.refreshGameData();
-        
-        res.json({
-            message: "Đã gửi yêu cầu refresh dữ liệu cả 2 bàn",
-            timestamp: new Date().toISOString()
-        });
+        res.json({ message: "Đã gửi yêu cầu refresh dữ liệu cả 2 bàn", timestamp: new Date().toISOString() });
     } else {
-        res.status(400).json({
-            error: "Không thể refresh",
-            message: "WebSocket chưa kết nối hoặc chưa xác thực"
-        });
+        res.status(400).json({ error: "Không thể refresh", message: "WebSocket chưa kết nối hoặc chưa xác thực", timestamp: new Date().toISOString() });
     }
 });
 
-// ==================== API DỰ ĐOÁN MỚI ====================
-// Dự đoán bàn TX
+// API dự đoán
 app.get('/api/predict/tx', (req, res) => {
     try {
         const prediction = client.getTxPrediction();
-        res.json({
-            board: 'tai_xiu',
-            ...prediction,
-            timestamp: new Date().toISOString()
-        });
+        res.json({ board: 'tai_xiu', ...prediction, timestamp: new Date().toISOString() });
     } catch (error) {
-        res.status(500).json({
-            error: 'Lỗi server',
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
+        res.status(500).json({ error: 'Lỗi server', message: error.message, timestamp: new Date().toISOString() });
     }
 });
 
-// Dự đoán bàn MD5
 app.get('/api/predict/md5', (req, res) => {
     try {
         const prediction = client.getMd5Prediction();
-        res.json({
-            board: 'md5',
-            ...prediction,
-            timestamp: new Date().toISOString()
-        });
+        res.json({ board: 'md5', ...prediction, timestamp: new Date().toISOString() });
     } catch (error) {
-        res.status(500).json({
-            error: 'Lỗi server',
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
+        res.status(500).json({ error: 'Lỗi server', message: error.message, timestamp: new Date().toISOString() });
     }
 });
 
-// Dự đoán cả hai bàn
 app.get('/api/predict/all', (req, res) => {
     try {
         const txPred = client.getTxPrediction();
         const md5Pred = client.getMd5Prediction();
-        res.json({
-            tai_xiu: txPred,
-            md5: md5Pred,
-            timestamp: new Date().toISOString()
-        });
+        res.json({ tai_xiu: txPred, md5: md5Pred, timestamp: new Date().toISOString() });
     } catch (error) {
-        res.status(500).json({
-            error: 'Lỗi server',
-            message: error.message,
-            timestamp: new Date().toISOString()
-        });
+        res.status(500).json({ error: 'Lỗi server', message: error.message, timestamp: new Date().toISOString() });
     }
 });
 
-// Route trang chủ (đã cập nhật giao diện để hiển thị dự đoán)
+// Trang chủ (giao diện)
 app.get('/', (req, res) => {
     res.send(`
         <html>
@@ -880,7 +824,6 @@ app.get('/', (req, res) => {
                 </div>
                 
                 <script>
-                    // Kiểm tra trạng thái và cập nhật liên tục
                     function updateStatus() {
                         fetch('/api/status')
                             .then(response => response.json())
@@ -908,13 +851,10 @@ app.get('/', (req, res) => {
                                     </div>
                                 \`;
                                 
-                                // Tự động lấy dữ liệu nếu có
                                 if (hasTxData) getTX();
                                 if (hasMd5Data) getMD5();
                             })
-                            .catch(error => {
-                                console.error('Error:', error);
-                            });
+                            .catch(error => console.error('Error:', error));
                     }
                     
                     function getTX() {
@@ -922,10 +862,7 @@ app.get('/', (req, res) => {
                             .then(response => response.json())
                             .then(data => {
                                 if (data.error) {
-                                    document.getElementById('tx-data').innerHTML = \`
-                                        <h3>🎲 Bàn Tài Xỉu</h3>
-                                        <p>❌ \${data.error}</p>
-                                    \`;
+                                    document.getElementById('tx-data').innerHTML = \`<h3>🎲 Bàn Tài Xỉu</h3><p>❌ \${data.error}</p>\`;
                                 } else {
                                     document.getElementById('tx-data').innerHTML = \`
                                         <h3>🎲 Bàn Tài Xỉu</h3>
@@ -943,10 +880,7 @@ app.get('/', (req, res) => {
                             .then(response => response.json())
                             .then(data => {
                                 if (data.error) {
-                                    document.getElementById('md5-data').innerHTML = \`
-                                        <h3>🔐 Bàn MD5</h3>
-                                        <p>❌ \${data.error}</p>
-                                    \`;
+                                    document.getElementById('md5-data').innerHTML = \`<h3>🔐 Bàn MD5</h3><p>❌ \${data.error}</p>\`;
                                 } else {
                                     document.getElementById('md5-data').innerHTML = \`
                                         <h3>🔐 Bàn MD5</h3>
@@ -959,10 +893,7 @@ app.get('/', (req, res) => {
                             });
                     }
                     
-                    function getAll() {
-                        getTX();
-                        getMD5();
-                    }
+                    function getAll() { getTX(); getMD5(); }
                     
                     function predictTX() {
                         fetch('/api/predict/tx')
@@ -987,9 +918,7 @@ app.get('/', (req, res) => {
                                 }
                                 document.getElementById('predict-tx-data').innerHTML = html;
                             })
-                            .catch(err => {
-                                document.getElementById('predict-tx-data').innerHTML = \`<p>❌ Lỗi: \${err.message}</p>\`;
-                            });
+                            .catch(err => document.getElementById('predict-tx-data').innerHTML = \`<p>❌ Lỗi: \${err.message}</p>\`);
                     }
                     
                     function predictMD5() {
@@ -1015,37 +944,24 @@ app.get('/', (req, res) => {
                                 }
                                 document.getElementById('predict-md5-data').innerHTML = html;
                             })
-                            .catch(err => {
-                                document.getElementById('predict-md5-data').innerHTML = \`<p>❌ Lỗi: \${err.message}</p>\`;
-                            });
+                            .catch(err => document.getElementById('predict-md5-data').innerHTML = \`<p>❌ Lỗi: \${err.message}</p>\`);
                     }
                     
-                    function predictAll() {
-                        predictTX();
-                        predictMD5();
-                    }
+                    function predictAll() { predictTX(); predictMD5(); }
                     
                     function refreshData() {
                         fetch('/api/refresh')
                             .then(response => response.json())
-                            .then(data => {
-                                alert(data.message);
-                                setTimeout(updateStatus, 2000);
-                            });
+                            .then(data => { alert(data.message); setTimeout(updateStatus, 2000); });
                     }
                     
-                    // Cập nhật mỗi 5 giây
                     updateStatus();
                     setInterval(updateStatus, 5000);
                     
-                    // Tự động lấy dữ liệu ban đầu và dự đoán sau 3 giây
                     setTimeout(() => {
                         getTX();
                         getMD5();
-                        setTimeout(() => {
-                            predictTX();
-                            predictMD5();
-                        }, 2000);
+                        setTimeout(() => { predictTX(); predictMD5(); }, 2000);
                     }, 3000);
                 </script>
             </body>
@@ -1060,15 +976,12 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`🔐 API Bàn MD5: http://localhost:${PORT}/api/md5`);
     console.log(`🔮 Dự đoán TX: http://localhost:${PORT}/api/predict/tx`);
     console.log(`🔮 Dự đoán MD5: http://localhost:${PORT}/api/predict/md5`);
-    console.log(`🌐 Truy cập từ mạng nội bộ: http://[YOUR_IP]:${PORT}`);
 });
 
-// Bắt đầu heartbeat sau khi kết nối
-setTimeout(() => {
-    client.startHeartbeat();
-}, 10000);
+// Heartbeat
+setTimeout(() => client.startHeartbeat(), 10000);
 
-// Xử lý tắt chương trình
+// Xử lý tắt
 process.on('SIGINT', () => {
     console.log('\n👋 Closing WebSocket connection and server...');
     client.close();
