@@ -11,17 +11,13 @@ class GameWebSocketClient {
         this.reconnectDelay = 5000;
         this.isAuthenticated = false;
         this.sessionId = null;
-        this.latestTxData = null;   // Dữ liệu bàn tài xỉu thường (cmd 1005)
-        this.latestMd5Data = null;  // Dữ liệu bàn MD5 (cmd 1105)
-        this.lastUpdateTime = {
-            tx: null,
-            md5: null
-        };
+        this.historyTx = [];        // Lịch sử bàn TX
+        this.historyMd5 = [];       // Lịch sử bàn MD5
+        this.lastUpdateTime = { tx: null, md5: null };
     }
 
     connect() {
         console.log('🔗 Connecting to WebSocket server (tik88)...');
-        
         this.ws = new WebSocket(this.url, {
             headers: {
                 'Host': 'api.apibinh.xyz',
@@ -35,7 +31,6 @@ class GameWebSocketClient {
                 'Sec-WebSocket-Version': '13'
             }
         });
-
         this.setupEventHandlers();
     }
 
@@ -45,30 +40,19 @@ class GameWebSocketClient {
             this.reconnectAttempts = 0;
             this.sendAuthentication();
         });
-
-        this.ws.on('message', (data) => {
-            this.handleMessage(data);
-        });
-
-        this.ws.on('error', (error) => {
-            console.error('❌ WebSocket error:', error.message);
-        });
-
+        this.ws.on('message', (data) => this.handleMessage(data));
+        this.ws.on('error', (error) => console.error('❌ WebSocket error:', error.message));
         this.ws.on('close', (code, reason) => {
-            console.log(`🔌 Connection closed. Code: ${code}, Reason: ${reason}`);
+            console.log(`🔌 Connection closed. Code: ${code}, Reason: ${String(reason)}`);
             this.isAuthenticated = false;
             this.sessionId = null;
             this.handleReconnect();
         });
-
-        this.ws.on('pong', () => {
-            console.log('❤️  Heartbeat received from server');
-        });
+        this.ws.on('pong', () => console.log('❤️  Heartbeat received from server'));
     }
 
     sendAuthentication() {
         console.log('🔐 Sending authentication...');
-        
         const authMessage = [
             1,
             "MiniGame",
@@ -91,13 +75,11 @@ class GameWebSocketClient {
                 "pid": 4
             }
         ];
-
         this.sendRaw(authMessage);
     }
 
     sendPluginMessages() {
         console.log('🚀 Sending plugin initialization messages...');
-        
         const pluginMessages = [
             [6, "MiniGame", "taixiuPlugin", { "cmd": 1005 }],
             [6, "MiniGame", "taixiuMd5Plugin", { "cmd": 1105 }],
@@ -105,26 +87,20 @@ class GameWebSocketClient {
             [6, "MiniGame", "taixiuMd5v2Plugin", { "cmd": 1405 }],
             [6, "MiniGame", "lobbyPlugin", { "cmd": 10001 }]
         ];
-
         pluginMessages.forEach((message, index) => {
             setTimeout(() => {
-                console.log(`📤 Sending plugin ${index + 1}/${pluginMessages.length}: ${message[2]}`);
+                console.log(`📤 Sending plugin ${index+1}/${pluginMessages.length}: ${message[2]}`);
                 this.sendRaw(message);
             }, index * 1000);
         });
-
-        setInterval(() => {
-            this.refreshGameData();
-        }, 30000);
+        setInterval(() => this.refreshGameData(), 30000);
     }
 
     refreshGameData() {
         if (this.isAuthenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
             console.log('🔄 Refreshing game data...');
-            const refreshTx = [6, "MiniGame", "taixiuPlugin", { "cmd": 1005 }];
-            const refreshMd5 = [6, "MiniGame", "taixiuMd5Plugin", { "cmd": 1105 }];
-            this.sendRaw(refreshTx);
-            setTimeout(() => this.sendRaw(refreshMd5), 1000);
+            this.sendRaw([6, "MiniGame", "taixiuPlugin", { "cmd": 1005 }]);
+            setTimeout(() => this.sendRaw([6, "MiniGame", "taixiuMd5Plugin", { "cmd": 1105 }]), 1000);
         }
     }
 
@@ -134,308 +110,265 @@ class GameWebSocketClient {
             this.ws.send(jsonString);
             console.log('📤 Sent raw:', jsonString);
             return true;
-        } else {
-            console.log('⚠️ Cannot send, WebSocket not open');
-            return false;
         }
+        console.log('⚠️ Cannot send, WebSocket not open');
+        return false;
+    }
+
+    _mergeHistory(historyArray, newSessions) {
+        if (!newSessions || !Array.isArray(newSessions)) return historyArray;
+        const existingSids = new Set(historyArray.map(s => s.sid));
+        const uniqueNew = newSessions.filter(s => !existingSids.has(s.sid));
+        const merged = [...historyArray, ...uniqueNew];
+        merged.sort((a, b) => b.sid - a.sid);
+        return merged.slice(0, 1000);
     }
 
     handleMessage(data) {
         try {
             const parsed = JSON.parse(data);
-            
-            // XỬ LÝ CMD 1005 - BÀN TÀI XỈU THƯỜNG
             if (parsed[0] === 5 && parsed[1] && parsed[1].cmd === 1005) {
                 console.log('🎯 Nhận được dữ liệu cmd 1005 (Bàn TX)');
                 const gameData = parsed[1];
                 if (gameData.htr && gameData.htr.length > 0) {
-                    const latestSession = gameData.htr.reduce((prev, current) => (current.sid > prev.sid) ? current : prev);
+                    const latestSession = gameData.htr.reduce((p,c) => c.sid > p.sid ? c : p);
                     console.log(`🎲 Bàn TX - Phiên gần nhất: ${latestSession.sid} (${latestSession.d1},${latestSession.d2},${latestSession.d3})`);
-                    this.latestTxData = gameData;
+                    this.historyTx = this._mergeHistory(this.historyTx, gameData.htr);
                     this.lastUpdateTime.tx = new Date();
+                    console.log(`💾 Lịch sử TX hiện có: ${this.historyTx.length} phiên`);
                 }
             }
-            
-            // XỬ LÝ CMD 1105 - BÀN MD5
             else if (parsed[0] === 5 && parsed[1] && parsed[1].cmd === 1105) {
                 console.log('🎯 Nhận được dữ liệu cmd 1105 (Bàn MD5)');
                 const gameData = parsed[1];
                 if (gameData.htr && gameData.htr.length > 0) {
-                    const latestSession = gameData.htr.reduce((prev, current) => (current.sid > prev.sid) ? current : prev);
+                    const latestSession = gameData.htr.reduce((p,c) => c.sid > p.sid ? c : p);
                     console.log(`🎲 Bàn MD5 - Phiên gần nhất: ${latestSession.sid} (${latestSession.d1},${latestSession.d2},${latestSession.d3})`);
-                    this.latestMd5Data = gameData;
+                    this.historyMd5 = this._mergeHistory(this.historyMd5, gameData.htr);
                     this.lastUpdateTime.md5 = new Date();
+                    console.log(`💾 Lịch sử MD5 hiện có: ${this.historyMd5.length} phiên`);
                 }
             }
-            
-            // Xử lý response authentication (type 5 nhưng không có cmd)
             else if (parsed[0] === 5 && parsed[1] && parsed[1].u) {
                 console.log('🔑 Authentication successful!');
-                const userData = parsed[1];
-                console.log(`✅ User: ${userData.u}`);
                 this.isAuthenticated = true;
-                setTimeout(() => {
-                    console.log('🔄 Starting to send plugin messages...');
-                    this.sendPluginMessages();
-                }, 2000);
+                setTimeout(() => this.sendPluginMessages(), 2000);
             }
-            
-            // Xử lý response type 1 - Session initialization
             else if (parsed[0] === 1 && parsed[4] === "MiniGame") {
                 console.log('✅ Session initialized');
                 this.sessionId = parsed[3];
                 console.log(`📋 Session ID: ${this.sessionId}`);
             }
-            
-            // Xử lý response type 7 - Plugin response
-            else if (parsed[0] === 7) {
-                const pluginName = parsed[2];
-                console.log(`🔄 Plugin ${pluginName} response received`);
-            }
-            
-            // Xử lý heartbeat/ping response
-            else if (parsed[0] === 0) {
-                console.log('❤️  Heartbeat received');
-            }
-            
+            else if (parsed[0] === 7) console.log(`🔄 Plugin ${parsed[2]} response received`);
+            else if (parsed[0] === 0) console.log('❤️  Heartbeat received');
         } catch (e) {
             console.log('📥 Raw message:', data.toString());
             console.error('❌ Parse error:', e.message);
         }
     }
 
-    // Hàm lấy phiên gần nhất từ bàn TX
     getLatestTxSession() {
-        if (!this.latestTxData || !this.latestTxData.htr || this.latestTxData.htr.length === 0) {
-            return { error: "Không có dữ liệu bàn TX", message: "Chưa nhận được dữ liệu từ server hoặc dữ liệu trống" };
-        }
+        if (this.historyTx.length === 0) return { error: "Không có dữ liệu bàn TX", message: "Chưa nhận được phiên nào" };
         try {
-            const latestSession = this.latestTxData.htr.reduce((prev, current) => (current.sid > prev.sid) ? current : prev);
-            const tong = latestSession.d1 + latestSession.d2 + latestSession.d3;
-            const ket_qua = (tong >= 11) ? "tài" : "xỉu";
+            const latest = this.historyTx[0];
+            const tong = latest.d1 + latest.d2 + latest.d3;
+            const ket_qua = tong >= 11 ? "tài" : "xỉu";
             return {
-                phien: latestSession.sid,
-                xuc_xac_1: latestSession.d1,
-                xuc_xac_2: latestSession.d2,
-                xuc_xac_3: latestSession.d3,
-                tong: tong,
-                ket_qua: ket_qua,
+                phien: latest.sid,
+                xuc_xac_1: latest.d1, xuc_xac_2: latest.d2, xuc_xac_3: latest.d3,
+                tong, ket_qua,
                 timestamp: new Date().toISOString(),
                 ban: "tai_xiu",
-                last_updated: this.lastUpdateTime.tx ? this.lastUpdateTime.tx.toISOString() : null
+                last_updated: this.lastUpdateTime.tx?.toISOString() || null
             };
-        } catch (error) {
-            return { error: "Lỗi xử lý dữ liệu TX", message: error.message };
-        }
+        } catch (e) { return { error: "Lỗi xử lý dữ liệu TX", message: e.message }; }
     }
 
-    // Hàm lấy phiên gần nhất từ bàn MD5
     getLatestMd5Session() {
-        if (!this.latestMd5Data || !this.latestMd5Data.htr || this.latestMd5Data.htr.length === 0) {
-            return { error: "Không có dữ liệu bàn MD5", message: "Chưa nhận được dữ liệu từ server hoặc dữ liệu trống" };
-        }
+        if (this.historyMd5.length === 0) return { error: "Không có dữ liệu bàn MD5", message: "Chưa nhận được phiên nào" };
         try {
-            const latestSession = this.latestMd5Data.htr.reduce((prev, current) => (current.sid > prev.sid) ? current : prev);
-            const tong = latestSession.d1 + latestSession.d2 + latestSession.d3;
-            const ket_qua = (tong >= 11) ? "tài" : "xỉu";
+            const latest = this.historyMd5[0];
+            const tong = latest.d1 + latest.d2 + latest.d3;
+            const ket_qua = tong >= 11 ? "tài" : "xỉu";
             return {
-                phien: latestSession.sid,
-                xuc_xac_1: latestSession.d1,
-                xuc_xac_2: latestSession.d2,
-                xuc_xac_3: latestSession.d3,
-                tong: tong,
-                ket_qua: ket_qua,
+                phien: latest.sid,
+                xuc_xac_1: latest.d1, xuc_xac_2: latest.d2, xuc_xac_3: latest.d3,
+                tong, ket_qua,
                 timestamp: new Date().toISOString(),
                 ban: "md5",
-                last_updated: this.lastUpdateTime.md5 ? this.lastUpdateTime.md5.toISOString() : null
+                last_updated: this.lastUpdateTime.md5?.toISOString() || null
             };
-        } catch (error) {
-            return { error: "Lỗi xử lý dữ liệu MD5", message: error.message };
-        }
+        } catch (e) { return { error: "Lỗi xử lý dữ liệu MD5", message: e.message }; }
     }
 
-    // ==================== PHÂN TÍCH VÀ DỰ ĐOÁN NÂNG CAO ====================
-    _getRecentResults(historyArray, limit = 50) {
+    // ==================== PHÂN TÍCH & DỰ ĐOÁN ====================
+    _toResultArray(historyArray, limit = 200) {
         if (!historyArray || historyArray.length === 0) return [];
-        const sorted = [...historyArray].sort((a, b) => b.sid - a.sid);
-        return sorted.slice(0, limit).map(s => (s.d1 + s.d2 + s.d3 >= 11 ? 'tài' : 'xỉu'));
+        return historyArray.slice(0, limit).map(s => (s.d1 + s.d2 + s.d3 >= 11 ? 'tài' : 'xỉu'));
     }
 
-    _overallProbability(results) {
-        if (results.length === 0) return { tai: 0.5, xiu: 0.5 };
-        const tai = results.filter(r => r === 'tài').length;
-        return { tai: tai / results.length, xiu: (results.length - tai) / results.length };
-    }
+    _analyzeWindow(results) {
+        if (results.length === 0) return null;
+        const len = results.length;
+        const taiCount = results.filter(r => r === 'tài').length;
+        const freqTai = taiCount / len;
+        const freqXiu = 1 - freqTai;
 
-    _streakAnalysis(results) {
-        if (results.length === 0) return { streak: 0, outcome: null, probContinue: 0.5 };
         let streak = 1;
         const first = results[0];
-        for (let i = 1; i < results.length; i++) {
+        for (let i = 1; i < len; i++) {
             if (results[i] === first) streak++;
             else break;
         }
-        let continueCount = 0, totalStreakEvents = 0;
-        for (let i = 0; i < results.length - streak; i++) {
-            let j = 0;
-            while (j < streak && i + j < results.length && results[i + j] === first) j++;
-            if (j >= streak) {
-                totalStreakEvents++;
-                if (i + streak < results.length && results[i + streak] === first) continueCount++;
+        let streakContinueProb = 0.5;
+        if (len > streak) {
+            let continueCount = 0, totalEvents = 0;
+            for (let i = 0; i <= len - streak - 1; i++) {
+                if (results.slice(i, i + streak).every(r => r === first)) {
+                    totalEvents++;
+                    if (i + streak < len && results[i + streak] === first) continueCount++;
+                }
+            }
+            if (totalEvents > 0) streakContinueProb = continueCount / totalEvents;
+        }
+
+        let m1 = { tai: 0.5, xiu: 0.5 };
+        if (len >= 2) {
+            let same = 0, diff = 0;
+            for (let i = 0; i < len - 1; i++) {
+                if (results[i] === first) {
+                    if (results[i + 1] === first) same++;
+                    else diff++;
+                }
+            }
+            const total = same + diff;
+            if (total > 0) {
+                m1 = { [first]: same / total, [first === 'tài' ? 'xỉu' : 'tài']: diff / total };
             }
         }
-        let prob = totalStreakEvents > 0 ? continueCount / totalStreakEvents : 0.5;
-        if (isNaN(prob)) prob = 0.5;
-        return { streak, outcome: first, probContinue: prob };
-    }
 
-    _markov1(results) {
-        if (results.length < 2) return { tai: 0.5, xiu: 0.5 };
-        const last = results[0];
-        let countSame = 0, countDiff = 0;
-        for (let i = 0; i < results.length - 1; i++) {
-            if (results[i] === last) {
-                if (results[i + 1] === last) countSame++;
-                else countDiff++;
+        let m2 = null;
+        if (len >= 3) {
+            const lastTwo = results.slice(0, 2).join('-');
+            const trans = {};
+            for (let i = 0; i < len - 2; i++) {
+                const key = results[i] + '-' + results[i + 1];
+                if (!trans[key]) trans[key] = { tai: 0, xiu: 0 };
+                trans[key][results[i + 2]]++;
+            }
+            if (trans[lastTwo]) {
+                const t = trans[lastTwo];
+                const total = t.tai + t.xiu;
+                if (total > 0) m2 = { tai: t.tai / total, xiu: t.xiu / total };
             }
         }
-        const total = countSame + countDiff;
-        if (total === 0) return { tai: 0.5, xiu: 0.5 };
-        let r = {
-            [last]: countSame / total,
-            [last === 'tài' ? 'xỉu' : 'tài']: countDiff / total
-        };
-        if (typeof r.tai !== 'number') r.tai = 0.5;
-        if (typeof r.xiu !== 'number') r.xiu = 0.5;
-        return r;
-    }
 
-    _markov2(results) {
-        if (results.length < 3) return null;
-        const lastTwo = results.slice(0, 2).join('-');
-        const transitions = {};
-        for (let i = 0; i < results.length - 2; i++) {
-            const key = results[i] + '-' + results[i + 1];
-            const next = results[i + 2];
-            if (!transitions[key]) transitions[key] = { tai: 0, xiu: 0 };
-            transitions[key][next]++;
+        let pattern = { pred: null, conf: 0 };
+        if (len >= 10) {
+            const recent = results.slice(0, 10);
+            if (recent[0] === recent[1]) pattern = { pred: recent[0], conf: 0.6 };
+            else pattern = { pred: recent[0] === 'tài' ? 'xỉu' : 'tài', conf: 0.65 };
         }
-        if (!transitions[lastTwo]) return null;
-        const t = transitions[lastTwo];
-        const total = t.tai + t.xiu;
-        if (total === 0) return null;
-        return { tai: t.tai / total, xiu: t.xiu / total };
-    }
 
-    _patternAnalysis(results) {
-        if (results.length < 10) return { prediction: null, confidence: 0 };
-        const recent = results.slice(0, 10);
-        if (recent[0] === recent[1]) {
-            return { prediction: recent[0], confidence: 0.6 };
-        } else {
-            return { prediction: recent[0] === 'tài' ? 'xỉu' : 'tài', confidence: 0.65 };
-        }
+        return { freqTai, freqXiu, streak: { length: streak, outcome: first, probContinue: streakContinueProb }, markov1: m1, markov2: m2, pattern };
     }
 
     predictNext(historyArray) {
-        const results = this._getRecentResults(historyArray, 50);
-        if (results.length < 5) {
-            return { success: false, message: `Chỉ có ${results.length} phiên, cần ít nhất 5 phiên để dự đoán` };
-        }
+        if (historyArray.length < 5) return { success: false, message: `Chỉ có ${historyArray.length} phiên, cần ít nhất 5` };
+        const resultsAll = this._toResultArray(historyArray, 200);
+        const windows = [
+            { size: 20, weight: 1.0 },
+            { size: 50, weight: 1.5 },
+            { size: 100, weight: 2.0 },
+            { size: 200, weight: 2.5 }
+        ];
 
-        const overall = this._overallProbability(results);
-        const streak = this._streakAnalysis(results);
-        let streakProb = streak.probContinue;
-        if (isNaN(streakProb)) streakProb = 0.5;
-        const markov1 = this._markov1(results);
-        let m1t = typeof markov1.tai === 'number' ? markov1.tai : 0.5;
-        let m1x = typeof markov1.xiu === 'number' ? markov1.xiu : 0.5;
-        const markov2 = this._markov2(results);
-        let m2t = markov2?.tai ?? null, m2x = markov2?.xiu ?? null;
-        const pattern = this._patternAnalysis(results);
-        let patternPred = pattern.prediction, patternConf = pattern.confidence;
+        let totalTaiScore = 0, totalXiuScore = 0, totalWeight = 0;
+        const windowResults = [];
 
-        const wOverall = 1.0;
-        const wStreak = streak.streak >= 3 ? 2.0 : 1.0;
-        const wMarkov1 = 1.5;
-        const wMarkov2 = markov2 ? 2.0 : 0;
-        const wPattern = patternConf > 0.6 ? 1.2 : (patternPred ? 0.5 : 0);
+        for (let w of windows) {
+            if (resultsAll.length < w.size) continue;
+            const windowSlice = resultsAll.slice(0, w.size);
+            const analysis = this._analyzeWindow(windowSlice);
+            if (!analysis) continue;
 
-        let taiScore = 0, xiuScore = 0, totalWeight = 0;
+            let taiScore = 0, xiuScore = 0, weightSum = 0;
 
-        taiScore += overall.tai * wOverall;
-        xiuScore += overall.xiu * wOverall;
-        totalWeight += wOverall;
+            taiScore += analysis.freqTai * 1.0; xiuScore += analysis.freqXiu * 1.0; weightSum += 1.0;
 
-        if (streak.outcome === 'tài') {
-            taiScore += streakProb * wStreak;
-            xiuScore += (1 - streakProb) * wStreak;
-        } else {
-            xiuScore += streakProb * wStreak;
-            taiScore += (1 - streakProb) * wStreak;
-        }
-        totalWeight += wStreak;
-
-        taiScore += m1t * wMarkov1;
-        xiuScore += m1x * wMarkov1;
-        totalWeight += wMarkov1;
-
-        if (markov2) {
-            taiScore += m2t * wMarkov2;
-            xiuScore += m2x * wMarkov2;
-            totalWeight += wMarkov2;
-        }
-
-        if (patternPred) {
-            if (patternPred === 'tài') {
-                taiScore += patternConf * wPattern;
-                xiuScore += (1 - patternConf) * wPattern;
+            if (analysis.streak.outcome === 'tài') {
+                taiScore += analysis.streak.probContinue * 1.2;
+                xiuScore += (1 - analysis.streak.probContinue) * 1.2;
             } else {
-                xiuScore += patternConf * wPattern;
-                taiScore += (1 - patternConf) * wPattern;
+                xiuScore += analysis.streak.probContinue * 1.2;
+                taiScore += (1 - analysis.streak.probContinue) * 1.2;
             }
-            totalWeight += wPattern;
+            weightSum += 1.2;
+
+            taiScore += analysis.markov1.tai * 1.3; xiuScore += analysis.markov1.xiu * 1.3; weightSum += 1.3;
+
+            if (analysis.markov2) {
+                taiScore += analysis.markov2.tai * 1.5; xiuScore += analysis.markov2.xiu * 1.5; weightSum += 1.5;
+            }
+
+            if (analysis.pattern.pred) {
+                if (analysis.pattern.pred === 'tài') {
+                    taiScore += analysis.pattern.conf * 1.0;
+                    xiuScore += (1 - analysis.pattern.conf) * 1.0;
+                } else {
+                    xiuScore += analysis.pattern.conf * 1.0;
+                    taiScore += (1 - analysis.pattern.conf) * 1.0;
+                }
+                weightSum += 1.0;
+            }
+
+            const windowTai = taiScore / weightSum;
+            const windowXiu = xiuScore / weightSum;
+            windowResults.push({ size: w.size, tai: windowTai, xiu: windowXiu });
+
+            totalTaiScore += windowTai * w.weight;
+            totalXiuScore += windowXiu * w.weight;
+            totalWeight += w.weight;
         }
 
-        if (isNaN(taiScore) || isNaN(xiuScore) || isNaN(totalWeight) || totalWeight === 0) {
-            return { success: false, message: 'Lỗi tính toán dự đoán (NaN)' };
+        if (totalWeight === 0) return { success: false, message: "Không đủ dữ liệu để phân tích" };
+
+        if (resultsAll.length >= 100) {
+            const recent20 = resultsAll.slice(0, 20);
+            const recent100 = resultsAll.slice(0, 100);
+            const tai20 = recent20.filter(r => r === 'tài').length / 20;
+            const tai100 = recent100.filter(r => r === 'tài').length / 100;
+            const trend = tai20 - tai100;
+            if (trend > 0.1) { totalTaiScore *= 1.02; totalXiuScore *= 0.98; }
+            else if (trend < -0.1) { totalTaiScore *= 0.98; totalXiuScore *= 1.02; }
         }
 
-        const finalTai = taiScore / totalWeight;
-        const finalXiu = xiuScore / totalWeight;
+        const finalTai = totalTaiScore / totalWeight;
+        const finalXiu = totalXiuScore / totalWeight;
         let prediction = finalTai > finalXiu ? 'tài' : (finalXiu > finalTai ? 'xỉu' : 'không xác định');
         let confidence = prediction === 'tài' ? finalTai * 100 : (prediction === 'xỉu' ? finalXiu * 100 : 0);
         if (isNaN(confidence)) confidence = 0;
+
+        const latestSession = historyArray[0]?.sid || null;
+        const nextSession = latestSession ? latestSession + 1 : null;
 
         return {
             success: true,
             prediction,
             confidence: Math.round(confidence * 10) / 10 + '%',
-            analysis: {
-                totalSessions: results.length,
-                recentResults: results.slice(0, 15),
-                overall,
-                streak: { length: streak.streak, outcome: streak.outcome, probContinue: Math.round(streak.probContinue * 100) / 100 },
-                markov1: { tai: m1t, xiu: m1x },
-                markov2: markov2 ? { tai: m2t, xiu: m2x } : null,
-                pattern: patternPred ? { prediction: patternPred, confidence: patternConf } : null,
-                weightedScores: { tai: Math.round(finalTai * 1000) / 1000, xiu: Math.round(finalXiu * 1000) / 1000 }
-            }
+            next_session: nextSession,
+            analysis: { totalSessions: resultsAll.length, windows: windowResults, recentResults: resultsAll.slice(0, 20) }
         };
     }
 
     getTxPrediction() {
-        if (!this.latestTxData || !this.latestTxData.htr || this.latestTxData.htr.length === 0) {
-            return { error: 'Không có dữ liệu bàn TX', message: 'Chưa nhận được dữ liệu từ server hoặc dữ liệu trống' };
-        }
-        return this.predictNext(this.latestTxData.htr);
+        if (this.historyTx.length === 0) return { error: 'Không có dữ liệu bàn TX', message: 'Chưa nhận được phiên nào' };
+        return this.predictNext(this.historyTx);
     }
 
     getMd5Prediction() {
-        if (!this.latestMd5Data || !this.latestMd5Data.htr || this.latestMd5Data.htr.length === 0) {
-            return { error: 'Không có dữ liệu bàn MD5', message: 'Chưa nhận được dữ liệu từ server hoặc dữ liệu trống' };
-        }
-        return this.predictNext(this.latestMd5Data.htr);
+        if (this.historyMd5.length === 0) return { error: 'Không có dữ liệu bàn MD5', message: 'Chưa nhận được phiên nào' };
+        return this.predictNext(this.historyMd5);
     }
 
     handleReconnect() {
@@ -443,118 +376,56 @@ class GameWebSocketClient {
             this.reconnectAttempts++;
             const delay = this.reconnectDelay * this.reconnectAttempts;
             console.log(`🔄 Attempting to reconnect in ${delay}ms (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-            setTimeout(() => {
-                console.log('🔄 Reconnecting...');
-                this.connect();
-            }, delay);
-        } else {
-            console.log('❌ Max reconnection attempts reached');
-        }
+            setTimeout(() => this.connect(), delay);
+        } else console.log('❌ Max reconnection attempts reached');
     }
 
     startHeartbeat() {
         setInterval(() => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                const heartbeatMsg = [0, this.sessionId || ""];
-                this.ws.send(JSON.stringify(heartbeatMsg));
-                console.log('❤️  Sending heartbeat...');
-            }
+            if (this.ws?.readyState === WebSocket.OPEN) this.sendRaw([0, this.sessionId || ""]);
         }, 25000);
     }
 
-    close() {
-        if (this.ws) {
-            this.ws.close();
-        }
-    }
+    close() { if (this.ws) this.ws.close(); }
 }
 
-// KHỞI TẠO EXPRESS SERVER
+// EXPRESS
 const app = express();
-const PORT = 3004; // Dùng port 3004 để tránh xung đột với các game khác
-
+const PORT = 3004;
 app.use(cors());
 app.use(express.json());
 
-// Tạo WebSocket client - URL cũ từ tik88
 const client = new GameWebSocketClient(
     'wss://api.apibinh.xyz/websocket?d=YW1SdWFXSnVhQT09fDJ8MTc2NjUzNjU0MTM3MHw0YTAxZjZhY2JjMGRhYjhkNWE1YzM3YzVjMmVlM2JjYXwyZmQ4Y2ZmZmM1NDQ5MGY3N2QyODg5ZWIyM2IzZGFlYg=='
 );
 client.connect();
 
-// ==================== API endpoints ====================
-app.get('/api/tx', (req, res) => {
-    const data = client.getLatestTxSession();
-    if (data.error) return res.status(404).json(data);
-    res.json(data);
-});
-
-app.get('/api/md5', (req, res) => {
-    const data = client.getLatestMd5Session();
-    if (data.error) return res.status(404).json(data);
-    res.json(data);
-});
-
-app.get('/api/all', (req, res) => {
-    res.json({
-        tai_xiu: client.getLatestTxSession(),
-        md5: client.getLatestMd5Session(),
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.get('/api/status', (req, res) => {
-    res.json({
-        status: "running",
-        websocket_connected: client.ws ? client.ws.readyState === WebSocket.OPEN : false,
-        authenticated: client.isAuthenticated,
-        has_tx_data: !!(client.latestTxData?.htr?.length),
-        has_md5_data: !!(client.latestMd5Data?.htr?.length),
-        tx_last_updated: client.lastUpdateTime.tx ? client.lastUpdateTime.tx.toISOString() : null,
-        md5_last_updated: client.lastUpdateTime.md5 ? client.lastUpdateTime.md5.toISOString() : null,
-        timestamp: new Date().toISOString()
-    });
-});
-
+app.get('/api/tx', (req, res) => { const d = client.getLatestTxSession(); d.error ? res.status(404).json(d) : res.json(d); });
+app.get('/api/md5', (req, res) => { const d = client.getLatestMd5Session(); d.error ? res.status(404).json(d) : res.json(d); });
+app.get('/api/all', (req, res) => res.json({ tai_xiu: client.getLatestTxSession(), md5: client.getLatestMd5Session(), timestamp: new Date().toISOString() }));
+app.get('/api/status', (req, res) => res.json({
+    status: "running",
+    websocket_connected: client.ws?.readyState === WebSocket.OPEN,
+    authenticated: client.isAuthenticated,
+    tx_history_count: client.historyTx.length,
+    md5_history_count: client.historyMd5.length,
+    tx_last_updated: client.lastUpdateTime.tx?.toISOString() || null,
+    md5_last_updated: client.lastUpdateTime.md5?.toISOString() || null,
+    timestamp: new Date().toISOString()
+}));
 app.get('/api/refresh', (req, res) => {
-    if (client.isAuthenticated && client.ws && client.ws.readyState === WebSocket.OPEN) {
+    if (client.isAuthenticated && client.ws?.readyState === WebSocket.OPEN) {
         client.refreshGameData();
         res.json({ message: "Đã gửi yêu cầu refresh dữ liệu", timestamp: new Date().toISOString() });
-    } else {
-        res.status(400).json({ error: "Không thể refresh", message: "WebSocket chưa kết nối hoặc chưa xác thực" });
-    }
+    } else res.status(400).json({ error: "Không thể refresh", message: "WebSocket chưa kết nối hoặc chưa xác thực" });
 });
 
-// ==================== API dự đoán (đầy đủ) ====================
-app.get('/api/predict/tx', (req, res) => {
-    try {
-        res.json({ board: 'tai_xiu', ...client.getTxPrediction(), timestamp: new Date().toISOString() });
-    } catch (error) {
-        res.status(500).json({ error: 'Lỗi server', message: error.message });
-    }
-});
+// Dự đoán đầy đủ
+app.get('/api/predict/tx', (req, res) => { try { res.json({ board: 'tai_xiu', ...client.getTxPrediction(), timestamp: new Date().toISOString() }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/predict/md5', (req, res) => { try { res.json({ board: 'md5', ...client.getMd5Prediction(), timestamp: new Date().toISOString() }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/predict/all', (req, res) => { try { res.json({ tai_xiu: client.getTxPrediction(), md5: client.getMd5Prediction(), timestamp: new Date().toISOString() }); } catch (e) { res.status(500).json({ error: e.message }); } });
 
-app.get('/api/predict/md5', (req, res) => {
-    try {
-        res.json({ board: 'md5', ...client.getMd5Prediction(), timestamp: new Date().toISOString() });
-    } catch (error) {
-        res.status(500).json({ error: 'Lỗi server', message: error.message });
-    }
-});
-
-app.get('/api/predict/all', (req, res) => {
-    try {
-        res.json({
-            tai_xiu: client.getTxPrediction(),
-            md5: client.getMd5Prediction(),
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        res.status(500).json({ error: 'Lỗi server', message: error.message });
-    }
-});
-
-// ==================== API dự đoán rút gọn (short) ====================
+// Rút gọn (short)
 app.get('/api/predict/tx/short', (req, res) => {
     try {
         const pred = client.getTxPrediction();
@@ -564,13 +435,11 @@ app.get('/api/predict/tx/short', (req, res) => {
             prediction: pred.prediction || 'không xác định',
             confidence: pred.confidence || '0%',
             latest_session: latest.phien || null,
+            next_session: pred.next_session || null,
             timestamp: new Date().toISOString()
         });
-    } catch (error) {
-        res.status(500).json({ error: 'Lỗi server', message: error.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/predict/md5/short', (req, res) => {
     try {
         const pred = client.getMd5Prediction();
@@ -580,13 +449,11 @@ app.get('/api/predict/md5/short', (req, res) => {
             prediction: pred.prediction || 'không xác định',
             confidence: pred.confidence || '0%',
             latest_session: latest.phien || null,
+            next_session: pred.next_session || null,
             timestamp: new Date().toISOString()
         });
-    } catch (error) {
-        res.status(500).json({ error: 'Lỗi server', message: error.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/predict/all/short', (req, res) => {
     try {
         const txPred = client.getTxPrediction();
@@ -597,25 +464,24 @@ app.get('/api/predict/all/short', (req, res) => {
             tai_xiu: {
                 prediction: txPred.prediction || 'không xác định',
                 confidence: txPred.confidence || '0%',
-                latest_session: txLatest.phien || null
+                latest_session: txLatest.phien || null,
+                next_session: txPred.next_session || null
             },
             md5: {
                 prediction: md5Pred.prediction || 'không xác định',
                 confidence: md5Pred.confidence || '0%',
-                latest_session: md5Latest.phien || null
+                latest_session: md5Latest.phien || null,
+                next_session: md5Pred.next_session || null
             },
             timestamp: new Date().toISOString()
         });
-    } catch (error) {
-        res.status(500).json({ error: 'Lỗi server', message: error.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Trang chủ đơn giản
 app.get('/', (req, res) => {
     res.send(`
         <html>
-            <head><title>Tik88 - Dự đoán Tài Xỉu</title>
+            <head><title>TIK88 - Dự đoán siêu cấp</title>
             <style>
                 body { font-family: Arial; margin: 40px; background: #f0f2f5; }
                 h1 { color: #333; text-align: center; }
@@ -625,19 +491,16 @@ app.get('/', (req, res) => {
             </style>
             </head>
             <body>
-                <h1>🎲 Tik88 - Dự đoán Tài Xỉu thông minh</h1>
+                <h1>🎲 TIK88 - Dự đoán Tài Xỉu siêu cấp (đa cửa sổ + xu hướng)</h1>
                 <div class="endpoint">
                     <h3>📊 API endpoints:</h3>
                     <ul>
-                        <li><code>GET /api/tx</code> - Phiên mới nhất bàn TX</li>
-                        <li><code>GET /api/md5</code> - Phiên mới nhất bàn MD5</li>
-                        <li><code>GET /api/predict/tx</code> - Dự đoán bàn TX (đầy đủ)</li>
-                        <li><code>GET /api/predict/tx/short</code> - Dự đoán TX (rút gọn)</li>
-                        <li><code>GET /api/predict/md5/short</code> - Dự đoán MD5 (rút gọn)</li>
-                        <li><code>GET /api/status</code> - Trạng thái</li>
+                        <li><code>GET /api/predict/tx/short</code> - Dự đoán TX (rút gọn + next_session)</li>
+                        <li><code>GET /api/predict/md5/short</code> - Dự đoán MD5 (rút gọn + next_session)</li>
+                        <li><code>GET /api/status</code> - Trạng thái & số lượng lịch sử</li>
                     </ul>
-                    <button class="btn" onclick="fetch('/api/predict/tx/short').then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">Dự đoán TX (short)</button>
-                    <button class="btn" onclick="fetch('/api/predict/md5/short').then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">Dự đoán MD5 (short)</button>
+                    <button class="btn" onclick="fetch('/api/predict/tx/short').then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">Dự đoán TX</button>
+                    <button class="btn" onclick="fetch('/api/predict/md5/short').then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">Dự đoán MD5</button>
                 </div>
                 <div id="status"></div>
                 <script>
@@ -646,11 +509,12 @@ app.get('/', (req, res) => {
                         let data = await res.json();
                         document.getElementById('status').innerHTML = \`
                             <div class="endpoint">
-                                <h3>📡 Trạng thái hệ thống</h3>
+                                <h3>📡 Trạng thái</h3>
                                 <p>WebSocket: \${data.websocket_connected ? '✅' : '❌'}</p>
-                                <p>Xác thực: \${data.authenticated ? '✅' : '⏳'}</p>
-                                <p>Dữ liệu TX: \${data.has_tx_data ? '✅' : '⏳'} (cập nhật: \${data.tx_last_updated ? new Date(data.tx_last_updated).toLocaleTimeString() : 'chưa có'})</p>
-                                <p>Dữ liệu MD5: \${data.has_md5_data ? '✅' : '⏳'} (cập nhật: \${data.md5_last_updated ? new Date(data.md5_last_updated).toLocaleTimeString() : 'chưa có'})</p>
+                                <p>Lịch sử TX: \${data.tx_history_count} phiên</p>
+                                <p>Lịch sử MD5: \${data.md5_history_count} phiên</p>
+                                <p>Cập nhật TX: \${data.tx_last_updated ? new Date(data.tx_last_updated).toLocaleTimeString() : 'chưa có'}</p>
+                                <p>Cập nhật MD5: \${data.md5_last_updated ? new Date(data.md5_last_updated).toLocaleTimeString() : 'chưa có'}</p>
                             </div>
                         \`;
                     }
@@ -663,17 +527,10 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Tik88 server đang chạy tại: http://localhost:${PORT}`);
+    console.log(`🚀 TIK88 server đang chạy tại: http://localhost:${PORT}`);
 });
 
-setTimeout(() => {
-    client.startHeartbeat();
-}, 10000);
-
-process.on('SIGINT', () => {
-    console.log('\n👋 Closing WebSocket connection and server...');
-    client.close();
-    process.exit();
-});
+setTimeout(() => client.startHeartbeat(), 10000);
+process.on('SIGINT', () => { client.close(); process.exit(); });
 
 module.exports = { GameWebSocketClient, app };
